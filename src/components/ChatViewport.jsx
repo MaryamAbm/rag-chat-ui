@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { ChatMessage } from './ChatMessage'
 import { Loader2 } from 'lucide-react'
 
-export function ChatViewport({ messages, isLoading }) {
+export function ChatViewport({ messages, isLoading, threadId, onFollowUp }) {
   const bottomRef = useRef(null)
 
   useEffect(() => {
@@ -13,7 +13,7 @@ export function ChatViewport({ messages, isLoading }) {
     <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-6">
       <div className="max-w-3xl mx-auto flex flex-col gap-6">
         {messages.map((msg) => (
-          <ChatMessage key={msg.id} message={msg} />
+          <ChatMessage key={msg.id} message={msg} threadId={threadId} onFollowUp={onFollowUp} />
         ))}
 
         {isLoading && (
