@@ -7,6 +7,7 @@
 @layer base {
   * {
     box-sizing: border-box;
+    transition: background-color 0.3s ease, border-color 0.3s ease, color 0.2s ease;
   }
   html, body, #root {
     height: 100%;
@@ -17,6 +18,10 @@
     font-family: 'Inter', system-ui, sans-serif;
     background-color: #f9fafb;
     color: #111827;
+  }
+  .dark body {
+    background-color: #030712;
+    color: #f9fafb;
   }
 }
 
@@ -35,4 +40,11 @@
     background-color: #d1d5db;
     border-radius: 9999px;
   }
+}
+
+@media print {
+  body { background: white !important; }
+  header, aside, .print\:hidden { display: none !important; }
+  .flex-1 { overflow: visible !important; }
+  .max-w-3xl { max-width: 100% !important; }
 }

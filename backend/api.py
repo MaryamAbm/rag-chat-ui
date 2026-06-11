@@ -1,6 +1,6 @@
 """
-RAG Chat – FastAPI backend using Groq (no FAISS required).
-Run with:  python -m uvicorn api:app --reload --port 8000
+RAG Chat – lightweight FastAPI backend using Groq (no FAISS required).
+Run with:  uvicorn api:app --reload --port 8000
 """
 
 import json
@@ -55,61 +55,49 @@ def get_db():
 
 
 def init_db():
-    conn = get_db()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS threads (
-            id TEXT PRIMARY KEY,
-            title TEXT DEFAULT 'New Chat',
-            created_at TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id TEXT PRIMARY KEY,
-            thread_id TEXT,
-            role TEXT,
-            content TEXT,
-            sources TEXT DEFAULT '[]',
-            versions TEXT DEFAULT '[]',
-            created_at TEXT,
-            FOREIGN KEY (thread_id) REFERENCES threads(id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS feedback (
-            id TEXT PRIMARY KEY,
-            message_id TEXT,
-            thread_id TEXT,
-            type TEXT,
-            question TEXT,
-            answer TEXT,
-            reasons TEXT DEFAULT '[]',
-            note TEXT DEFAULT '',
-            created_at TEXT
-        )
-    """)
-    # Migrations for older DBs
-    for col, definition in [
-        ("versions", "TEXT DEFAULT '[]'"),
-    ]:
+    with get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS threads (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT 'New Chat',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                sources TEXT DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS feedback (
+                id TEXT PRIMARY KEY,
+                message_id TEXT,
+                rating TEXT,
+                reason TEXT,
+                comment TEXT,
+                created_at TEXT NOT NULL
+            );
+        """)
+        # Migration: add versions column if missing
         try:
-            conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {definition}")
+            conn.execute("ALTER TABLE messages ADD COLUMN versions TEXT DEFAULT '[]'")
         except sqlite3.OperationalError:
-            pass
-    conn.commit()
-    conn.close()
+            pass  # column already exists
 
-
-# ---------------------------------------------------------------------------
-# App startup
-# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     yield
 
-app = FastAPI(lifespan=lifespan)
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="RAG Chat API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -118,11 +106,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = Groq(api_key=GROQ_API_KEY)
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
 
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
+
+class ThreadPatch(BaseModel):
+    title: str
+
 
 class AskRequest(BaseModel):
     question: str
@@ -130,18 +123,16 @@ class AskRequest(BaseModel):
     document_context: str | None = None
 
 
-class FeedbackRequest(BaseModel):
-    message_id: str
-    thread_id: str
-    type: str
+class RegenerateRequest(BaseModel):
     question: str
-    answer: str
-    reasons: list[str] = []
-    note: str = ""
+    thread_id: str
 
 
-class RenameRequest(BaseModel):
-    title: str
+class FeedbackRequest(BaseModel):
+    message_id: str | None = None
+    rating: str
+    reason: str | None = None
+    comment: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -220,9 +211,9 @@ def build_stream_generator(question, temperature=0.3):
     for chunk in stream:
         token = chunk.choices[0].delta.content or ""
         full_content += token
-        yield ("token", token)
+        yield ("token", token)          # stream everything live
 
-    # Post-stream: extract CITATIONS
+    # ── Post-stream: extract CITATIONS ──────────────────────────────────────
     save_content = full_content
     cite_match = _CITE_RE.search(full_content)
     if cite_match:
@@ -234,7 +225,7 @@ def build_stream_generator(question, temperature=0.3):
             yield ("sources", parsed)
         save_content = full_content[:cite_match.start()].strip()
 
-    # Post-stream: extract FOLLOWUPS
+    # ── Post-stream: extract FOLLOWUPS ──────────────────────────────────────
     fups_match = _FUPS_RE.search(full_content)
     if fups_match:
         after = full_content[fups_match.end():]
@@ -257,6 +248,7 @@ def sse_from_generator(gen):
             yield f"data: {json.dumps(data)}\n\n"
         elif event_type == "sources":
             yield f"event: sources\ndata: {json.dumps(data)}\n\n"
+            # Also send as plain data array so frontend detects it
             yield f"data: {json.dumps(data)}\n\n"
         elif event_type == "followups":
             yield f"event: followups\ndata: {json.dumps(data)}\n\n"
@@ -276,146 +268,176 @@ def health():
 
 @app.get("/threads")
 def list_threads():
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM threads ORDER BY created_at DESC"
-    ).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM threads ORDER BY created_at DESC"
+        ).fetchall()
     return [thread_to_dict(r) for r in rows]
 
 
-@app.post("/threads")
+@app.post("/threads", status_code=201)
 def create_thread():
-    conn = get_db()
-    tid = str(uuid.uuid4())
-    now = now_iso()
-    conn.execute(
-        "INSERT INTO threads (id, title, created_at) VALUES (?, ?, ?)",
-        (tid, "New Chat", now),
-    )
-    conn.commit()
-    conn.close()
-    return {"id": tid, "title": "New Chat", "created_at": now}
+    thread = {"id": str(uuid.uuid4()), "title": "New Chat", "created_at": now_iso()}
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO threads (id, title, created_at) VALUES (?, ?, ?)",
+            (thread["id"], thread["title"], thread["created_at"]),
+        )
+    return thread
+
+
+@app.patch("/threads/{thread_id}")
+def rename_thread(thread_id: str, body: ThreadPatch):
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE threads SET title = ? WHERE id = ?", (body.title, thread_id)
+        )
+    return {"ok": True}
 
 
 @app.delete("/threads/{thread_id}")
 def delete_thread(thread_id: str):
-    conn = get_db()
-    conn.execute("DELETE FROM messages WHERE thread_id = ?", (thread_id,))
-    conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
-
-
-@app.patch("/threads/{thread_id}")
-def rename_thread(thread_id: str, body: RenameRequest):
-    conn = get_db()
-    conn.execute(
-        "UPDATE threads SET title = ? WHERE id = ?", (body.title, thread_id)
-    )
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
     return {"ok": True}
 
 
 @app.get("/threads/{thread_id}/messages")
 def get_messages(thread_id: str):
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC",
-        (thread_id,),
-    ).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC",
+            (thread_id,),
+        ).fetchall()
     return [msg_to_dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
-# Routes – ask (streaming)
+# Route – streaming ask
 # ---------------------------------------------------------------------------
 
 @app.post("/ask/stream")
 def ask_stream(body: AskRequest):
-    conn = get_db()
-
-    # Save user message
-    user_id = str(uuid.uuid4())
-    user_now = now_iso()
-
-    def save_user():
-        c = get_db()
-        c.execute(
-            "INSERT INTO messages (id, thread_id, role, content, sources, versions, created_at) VALUES (?,?,?,?,?,?,?)",
-            (user_id, body.thread_id, "user", body.question, "[]", "[]", user_now),
+    if not client:
+        raise HTTPException(
+            status_code=500,
+            detail="GROQ_API_KEY is not set. Add it to backend/.env",
         )
-        c.commit()
-        c.close()
-
-    save_with_retry(save_user)
-
-    assistant_id = str(uuid.uuid4())
-    assistant_now = now_iso()
 
     question = body.question
     if body.document_context:
-        question = f"Context from uploaded document:\n{body.document_context}\n\nQuestion: {body.question}"
+        question = f"{body.document_context}\n\n---\n\nQuestion: {body.question}"
 
-    gen = build_stream_generator(question)
-
-    def stream():
-        sources = []
-        clean_content = ""
-        for event_type, data in gen:
-            if event_type == "token":
-                yield f"data: {json.dumps(data)}\n\n"
-            elif event_type == "sources":
-                sources = data
-                yield f"event: sources\ndata: {json.dumps(data)}\n\n"
-                yield f"data: {json.dumps(data)}\n\n"
-            elif event_type == "followups":
-                yield f"event: followups\ndata: {json.dumps(data)}\n\n"
-                yield f"data: {json.dumps(data)}\n\n"
-            elif event_type == "done":
-                clean_content = data
-                yield "data: [DONE]\n\n"
-
-        def save_assistant():
-            c = get_db()
-            c.execute(
-                "INSERT INTO messages (id, thread_id, role, content, sources, versions, created_at) VALUES (?,?,?,?,?,?,?)",
-                (assistant_id, body.thread_id, "assistant", clean_content,
-                 json.dumps(sources), "[]", assistant_now),
+    # Persist user message
+    user_msg_id = str(uuid.uuid4())
+    def save_user():
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO messages (id, thread_id, role, content, sources, versions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_msg_id, body.thread_id, "user", body.question, "[]", "[]", now_iso()),
             )
-            c.commit()
-            c.close()
+    save_with_retry(save_user)
 
-        save_with_retry(save_assistant)
+    assistant_msg_id = str(uuid.uuid4())
 
-    conn.close()
-    return StreamingResponse(stream(), media_type="text/event-stream")
+    def generate():
+        try:
+            gen = build_stream_generator(question)
+            save_content = ""
+            save_sources = []
+
+            for event_type, data in gen:
+                if event_type == "token":
+                    yield f"data: {json.dumps(data)}\n\n"
+                elif event_type == "sources":
+                    save_sources = data
+                    yield f"event: sources\ndata: {json.dumps(data)}\n\n"
+                    yield f"data: {json.dumps(data)}\n\n"
+                elif event_type == "followups":
+                    yield f"event: followups\ndata: {json.dumps(data)}\n\n"
+                    yield f"data: {json.dumps(data)}\n\n"
+                elif event_type == "done":
+                    save_content = data
+
+            def save_assistant():
+                with get_db() as conn:
+                    conn.execute(
+                        "INSERT INTO messages (id, thread_id, role, content, sources, versions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (assistant_msg_id, body.thread_id, "assistant", save_content,
+                         json.dumps(save_sources), "[]", now_iso()),
+                    )
+            save_with_retry(save_assistant)
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps(f'Error: {str(e)}')}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------------------
-# Routes – feedback
+# Route – regenerate a specific assistant message
+# ---------------------------------------------------------------------------
+
+@app.post("/messages/{message_id}/regenerate")
+def regenerate_message(message_id: str, body: RegenerateRequest):
+    if not client:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not set.")
+
+    def generate():
+        try:
+            gen = build_stream_generator(body.question, temperature=0.5)
+            save_content = ""
+            save_sources = []
+
+            for event_type, data in gen:
+                if event_type == "token":
+                    yield f"data: {json.dumps(data)}\n\n"
+                elif event_type == "sources":
+                    save_sources = data
+                    yield f"event: sources\ndata: {json.dumps(data)}\n\n"
+                    yield f"data: {json.dumps(data)}\n\n"
+                elif event_type == "followups":
+                    yield f"event: followups\ndata: {json.dumps(data)}\n\n"
+                    yield f"data: {json.dumps(data)}\n\n"
+                elif event_type == "done":
+                    save_content = data
+
+            # Append old content to versions, update message
+            def update_msg():
+                with get_db() as conn:
+                    row = conn.execute(
+                        "SELECT content, versions FROM messages WHERE id = ?",
+                        (message_id,)
+                    ).fetchone()
+                    if row:
+                        old_versions = json.loads(row["versions"] or "[]")
+                        old_versions.append({"content": row["content"]})
+                        conn.execute(
+                            "UPDATE messages SET content = ?, sources = ?, versions = ? WHERE id = ?",
+                            (save_content, json.dumps(save_sources),
+                             json.dumps(old_versions), message_id)
+                        )
+            save_with_retry(update_msg)
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps(f'Error: {str(e)}')}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Route – feedback
 # ---------------------------------------------------------------------------
 
 @app.post("/feedback")
-def send_feedback(body: FeedbackRequest):
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO feedback (id, message_id, thread_id, type, question, answer, reasons, note, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (
-            str(uuid.uuid4()),
-            body.message_id,
-            body.thread_id,
-            body.type,
-            body.question,
-            body.answer,
-            json.dumps(body.reasons),
-            body.note,
-            now_iso(),
-        ),
-    )
-    conn.commit()
-    conn.close()
+def save_feedback(body: FeedbackRequest):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO feedback (id, message_id, rating, reason, comment, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), body.message_id, body.rating, body.reason, body.comment, now_iso()),
+        )
     return {"ok": True}
