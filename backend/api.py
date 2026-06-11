@@ -1,6 +1,12 @@
 """
 RAG Chat – lightweight FastAPI backend using Groq (no FAISS required).
 Run with:  uvicorn api:app --reload --port 8000
+
+Refactor notes:
+- Extracted stream generator logic into build_stream_generator()
+- Centralised DB connection settings in get_db()
+- Added save_with_retry() for resilient SQLite writes
+- Separated SSE formatting into sse_from_generator()
 """
 
 import json
