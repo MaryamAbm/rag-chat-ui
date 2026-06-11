@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { BookOpen, Cpu, HelpCircle, Sun, Moon, Bookmark, Download, FileText, FileDown, Menu, X } from 'lucide-react'
+import { BookOpen, Cpu, HelpCircle, Sun, Moon, Bookmark, Download, FileText, FileDown, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { Badge } from './ui/Badge'
 import { Button } from './ui/Button'
 
@@ -12,15 +12,15 @@ export function Header({
   return (
     <header className="h-14 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 flex items-center px-4 gap-2 sm:gap-3 shrink-0 print:hidden">
 
-      {/* Sidebar toggle (mobile) */}
+      {/* Sidebar toggle */}
       <Button
         variant="ghost"
         size="icon"
-        className="md:hidden text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+        className="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
         onClick={onToggleSidebar}
         title={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
       >
-        {sidebarOpen ? <X size={18} /> : <Menu size={18} />}
+        {sidebarOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
       </Button>
 
       {/* Logo + Title */}

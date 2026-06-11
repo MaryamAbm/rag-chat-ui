@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { jsPDF } from 'jspdf'
 import { Header } from './components/Header'
-import { Sidebar } from './components/chatthreads'
-import { ChatViewport } from './components/autoscroll'
+import { Sidebar } from './components/Sidebar'
+import { ChatViewport } from './components/ChatViewport'
 import { InputBar } from './components/InputBar'
 import { GuidedTour, useTour } from './components/GuidedTour'
 import { BookmarksPanel } from './components/BookmarksPanel'
@@ -349,8 +349,8 @@ export default function App() {
         />
       )}
 
-      {/* Sidebar — hidden on mobile when closed */}
-      <div className={`${sidebarOpen ? 'flex' : 'hidden'} md:flex shrink-0`}>
+      {/* Sidebar — collapsible on all screen sizes */}
+      <div className={`${sidebarOpen ? 'flex' : 'hidden'} shrink-0`}>
         <Sidebar
           activeThreadId={threadId}
           onSelectThread={handleSelectThread}
